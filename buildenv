@@ -1,0 +1,189 @@
+# bump: brotli-version /BROTLI_VERSION="(.*)"/ https://github.com/google/brotli.git|semver:*
+BROTLI_VERSION="1.2.0"
+
+###
+### Build control file for the brotli port
+###
+### brotli is Google's compression format: better ratios than gzip at
+### comparable speed, and the encoding used by every modern browser for
+### Content-Encoding. The Python bindings live in the same repository as the C
+### library and build it as part of the extension.
+###
+
+export ZOPEN_PROJECT_NAME="brotli"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_CATEGORIES="development library"
+
+export ZOPEN_STABLE_URL="https://github.com/google/brotli.git"
+export ZOPEN_STABLE_TAG="v${BROTLI_VERSION}"
+export ZOPEN_DEV_URL="https://github.com/google/brotli.git"
+
+export ZOPEN_STABLE_DEPS="check_python"
+export ZOPEN_DEV_DEPS="check_python"
+export ZOPEN_RUNTIME_DEPS="check_python"
+
+export ZOPEN_BUILD_SYSTEM="Python"
+
+zopen_get_version() {
+  echo "${BROTLI_VERSION}"
+}
+
+zopen_python_test() {
+  BROTLI_EXPECTED_VERSION="${BROTLI_VERSION}" python - <<'PYEOF'
+import os
+import sys
+import sysconfig
+
+# Exercise the installed wheel rather than the checkout, which would otherwise
+# shadow it and let the tests pass against source that was never packaged.
+#
+# realpath on both sides: /tmp is a symlink to /$SYSNAME/tmp here, so a path
+# spelled /tmp/... and a working directory of /S0W1/tmp/... are the same place
+# while abspath compares them as different.
+_here = os.path.realpath(os.getcwd())
+sys.path = [p for p in sys.path
+            if p not in ("", ".") and os.path.realpath(p) != _here]
+
+failures = 0
+total = 0
+
+
+def check(label, fn):
+    global failures, total
+    total += 1
+    try:
+        if fn():
+            print("PASS:", label)
+        else:
+            print("FAIL:", label, file=sys.stderr)
+            failures += 1
+    except Exception as exc:
+        print("FAIL:", label, "-", exc, file=sys.stderr)
+        failures += 1
+
+
+try:
+    import brotli
+except ImportError as exc:
+    print("FAIL: import brotli -", exc, file=sys.stderr)
+    print("brotli FAILED to import on Python %s" % sys.version.split()[0])
+    sys.exit(1)
+
+import importlib.metadata
+
+check("imported from the installed wheel, not the source tree",
+      lambda: os.path.realpath(brotli.__file__).startswith(
+          os.path.realpath(sysconfig.get_paths()["purelib"])))
+
+check("version is the one this port builds",
+      lambda: importlib.metadata.version("Brotli")
+      == os.environ["BROTLI_EXPECTED_VERSION"])
+
+# brotli is entirely a C extension -- there is no pure Python fallback -- so a
+# missing binary shows up as the import above failing rather than as slowness.
+check("round trip through compress and decompress",
+      lambda: brotli.decompress(brotli.compress(b"zopen on z/OS" * 50))
+      == b"zopen on z/OS" * 50)
+
+check("compression actually shrinks repetitive input",
+      lambda: len(brotli.compress(b"z" * 10000)) < 200)
+
+check("empty input round trips",
+      lambda: brotli.decompress(brotli.compress(b"")) == b"")
+
+
+def all_quality_levels():
+    data = b"zopen on z/OS " * 200
+    return all(brotli.decompress(brotli.compress(data, quality=q)) == data
+               for q in (0, 1, 5, 9, 11))
+
+
+check("every quality level round trips", all_quality_levels)
+
+
+def binary_payload():
+    # Bytes spanning the full range, which on an EBCDIC platform is where a
+    # text-conversion bug in the bindings would show up.
+    data = bytes(range(256)) * 40
+    return brotli.decompress(brotli.compress(data)) == data
+
+
+check("full 8-bit byte range survives a round trip", binary_payload)
+
+
+def large_payload():
+    import hashlib
+    data = (b"the quick brown fox jumps over the lazy dog " * 20000)
+    before = hashlib.sha256(data).hexdigest()
+    after = hashlib.sha256(brotli.decompress(brotli.compress(data))).hexdigest()
+    return before == after
+
+
+check("a megabyte round trips byte for byte", large_payload)
+
+
+def rejects_corrupt_input():
+    try:
+        brotli.decompress(b"this is not brotli data at all")
+    except brotli.error:
+        return True
+    return False
+
+
+check("corrupt input raises rather than returning garbage",
+      rejects_corrupt_input)
+
+
+def streaming_decompressor():
+    data = b"zopen on z/OS " * 500
+    comp = brotli.compress(data)
+    d = brotli.Decompressor()
+    out = b"".join(d.process(comp[i:i + 64])
+                   for i in range(0, len(comp), 64))
+    return out == data and d.is_finished()
+
+
+check("the streaming decompressor reassembles a chunked stream",
+      streaming_decompressor)
+
+check("modes are selectable",
+      lambda: brotli.decompress(
+          brotli.compress(b"zopen" * 100, mode=brotli.MODE_TEXT)) == b"zopen" * 100)
+
+print()
+print("brotli %s on Python %s  --  %d passed, %d failed" % (
+    importlib.metadata.version("Brotli"),
+    sys.version.split()[0], total - failures, failures))
+sys.exit(1 if failures else 0)
+PYEOF
+}
+
+zopen_check_results() {
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
+  # No "|| echo 0": grep -c prints 0 when nothing matches and also exits 1, so
+  # the fallback appends a second zero and the arithmetic dies with FSUM9224.
+  passed=$(grep -c "^PASS:" "${chk}" 2>/dev/null)
+  failed=$(grep -c "^FAIL:" "${chk}" 2>/dev/null)
+  passed=${passed:-0}
+  failed=${failed:-0}
+  total=$((passed + failed))
+
+  # An interpreter whose test script dies before the first check contributes no
+  # PASS and no FAIL, so counting those alone would score a crash as a clean run.
+  interpreters=$(grep -c "^brotli .* on Python" "${chk}" 2>/dev/null)
+  interpreters=${interpreters:-0}
+  expected=$(echo "${ZOPEN_PYTHON_VERSIONS:-3.12 3.13 3.14}" | wc -w | tr -d ' ')
+  if [ "${interpreters}" -lt "${expected}" ]; then
+    silent=$((expected - interpreters))
+    failed=$((failed + silent))
+    total=$((total + silent))
+  fi
+
+  echo "actualFailures:${failed}"
+  echo "totalTests:${total}"
+  echo "expectedFailures:0"
+}
+
+zopen_append_to_validate_install() {
+  echo "python3 -c \"import brotli; assert brotli.decompress(brotli.compress(b'x'*100)) == b'x'*100; import importlib.metadata; print('brotli', importlib.metadata.version('Brotli'))\""
+}
