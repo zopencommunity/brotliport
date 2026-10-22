@@ -1,5 +1,5 @@
 # bump: brotli-version /BROTLI_VERSION="(.*)"/ https://github.com/google/brotli.git|semver:*
-BROTLI_VERSION="1.2.0"
+BROTLI_VERSION="1.2.1"
 
 ###
 ### Build control file for the brotli port
